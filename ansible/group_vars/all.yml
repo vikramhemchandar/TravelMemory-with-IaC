@@ -1,0 +1,15 @@
+# MERN App Git Configuration
+git_repo_url: "https://github.com/UnpredictablePrashant/TravelMemory.git"
+project_dest: "/home/ubuntu/travelmemory"
+
+# Database Configuration
+mongo_db_name: "travelmemory"
+mongo_db_user: "traveluser"
+mongo_db_password: "SecureTravelPass123!"
+
+# Server Network Details
+web_server_public_ip: "35.170.59.30"
+database_server_private_ip: "10.0.2.22"
+
+# MERN Port Configurations
+backend_port: "3001"

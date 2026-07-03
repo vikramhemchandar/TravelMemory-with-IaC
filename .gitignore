@@ -1,0 +1,43 @@
+# ==========================================
+# Terraform Ignore Patterns
+# ==========================================
+
+# Local .terraform path containing plugin binaries
+**/terraform/.terraform/
+
+# Terraform state files (contain passwords and resource secrets)
+**/terraform/*.tfstate
+**/terraform/*.tfstate.backup
+**/terraform/*.tfstate.lock.info
+
+# Terraform variable definitions (might contain sensitive credentials)
+**/terraform/*.tfvars
+**/terraform/*.tfvars.json
+
+# Ignore override files
+**/terraform/override.tf
+**/terraform/override.tf.json
+**/terraform/*_override.tf
+**/terraform/*_override.tf.json
+
+# CLI configuration files
+**/terraform/.terraformrc
+**/terraform/terraform.rc
+
+# Ignore dynamically-generated private SSH keys
+**/*.pem
+
+# ==========================================
+# Ansible Ignore Patterns
+# ==========================================
+
+# Ansible retry files (generated upon task failures)
+**/*.retry
+
+# Ansible execution logs
+**/ansible/*.log
+
+# Local secrets or password files
+**/ansible/.vault_pass
+**/ansible/*_vault
+**/ansible/*.vault

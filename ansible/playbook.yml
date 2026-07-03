@@ -1,0 +1,273 @@
+---
+# ==========================================
+# PLAY 1: Configure Private Database Server
+# ==========================================
+- name: Configure MongoDB Database Server
+  hosts: db
+  become: yes
+  tasks:
+    - name: Update apt cache and install prerequisites
+      apt:
+        update_cache: yes
+        name:
+          - gnupg
+          - curl
+        state: present
+
+    - name: Import MongoDB public GPG key
+      apt_key:
+        url: https://www.mongodb.org/static/pgp/server-7.0.asc
+        state: present
+        keyring: /usr/share/keyrings/mongodb-server-7.0.gpg
+
+    - name: Add MongoDB APT repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse"
+        state: present
+        filename: mongodb-org-7.0
+
+    - name: Install MongoDB community edition
+      apt:
+        update_cache: yes
+        name: mongodb-org
+        state: present
+
+    - name: Configure MongoDB to bind to all network interfaces
+      lineinfile:
+        path: /etc/mongod.conf
+        regexp: '^\s*bindIp:\s*127.0.0.1'
+        line: '  bindIp: 0.0.0.0'
+      notify: Restart MongoDB
+
+    - name: Start and enable MongoDB service
+      service:
+        name: mongod
+        state: started
+        enabled: yes
+
+    - name: Wait for MongoDB port 27017 to be open
+      wait_for:
+        port: 27017
+        timeout: 30
+
+    - name: Create MERN database application user
+      shell: |
+        mongosh --eval 'if (!db.getSiblingDB("{{ mongo_db_name }}").getUser("{{ mongo_db_user }}")) { db.getSiblingDB("{{ mongo_db_name }}").createUser({user: "{{ mongo_db_user }}", pwd: "{{ mongo_db_password }}", roles: [{role: "readWrite", db: "{{ mongo_db_name }}"}]}); }'
+      register: mongo_user_creation
+      changed_when: "'Successfully added user' in mongo_user_creation.stdout"
+
+    - name: Enable authorization in MongoDB configuration
+      blockinfile:
+        path: /etc/mongod.conf
+        insertafter: '^#security:'
+        block: |
+          security:
+            authorization: enabled
+      notify: Restart MongoDB
+
+    # ==========================
+    # SECURITY HARDENING (DB)
+    # ==========================
+    - name: Disable SSH Root Login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: Reload SSH
+
+    - name: Disable SSH Password Authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: Reload SSH
+
+    - name: Configure UFW firewall for Database Server
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: tcp
+      loop:
+        - { port: '22' }       # SSH access (restricted externally via SG)
+        - { port: '27017' }    # MongoDB access (restricted externally via SG)
+
+    - name: Enable UFW firewall
+      ufw:
+        state: enabled
+        policy: deny
+
+  handlers:
+    - name: Restart MongoDB
+      service:
+        name: mongod
+        state: restarted
+
+    - name: Reload SSH
+      service:
+        name: ssh
+        state: reloaded
+
+
+# ==========================================
+# PLAY 2: Configure Web Server & Deploy App
+# ==========================================
+- name: Configure Web Server and Deploy MERN Application
+  hosts: web
+  become: yes
+  tasks:
+    - name: Install prerequisites
+      apt:
+        update_cache: yes
+        name:
+          - curl
+          - git
+          - ca-certificates
+        state: present
+
+    - name: Add NodeSource Node.js 20.x GPG key
+      shell: curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+      args:
+        creates: /etc/apt/keyrings/nodesource.gpg
+
+    - name: Add NodeSource Node.js 20.x repository
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main"
+        state: present
+        filename: nodesource
+
+    - name: Install Node.js
+      apt:
+        update_cache: yes
+        name: nodejs
+        state: present
+
+    - name: Install PM2 and serve globally
+      npm:
+        name: "{{ item }}"
+        global: yes
+        state: present
+      loop:
+        - pm2
+        - serve
+
+    - name: Create deployment target folder
+      file:
+        path: "{{ project_dest }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Clone TravelMemory repository
+      become: yes
+      become_user: ubuntu
+      git:
+        repo: "{{ git_repo_url }}"
+        dest: "{{ project_dest }}"
+        version: main
+        force: yes
+
+    - name: Install NPM dependencies for backend
+      become: yes
+      become_user: ubuntu
+      npm:
+        path: "{{ project_dest }}/backend"
+        state: present
+
+    - name: Create backend .env configuration file
+      become: yes
+      become_user: ubuntu
+      copy:
+        dest: "{{ project_dest }}/backend/.env"
+        content: |
+          PORT={{ backend_port }}
+          MONGO_URI=mongodb://{{ mongo_db_user }}:{{ mongo_db_password }}@{{ database_server_private_ip }}:27017/{{ mongo_db_name }}?authSource={{ mongo_db_name }}
+        mode: '0600'
+
+    - name: Install NPM dependencies for frontend
+      become: yes
+      become_user: ubuntu
+      npm:
+        path: "{{ project_dest }}/frontend"
+        state: present
+
+    - name: Create frontend .env configuration file
+      become: yes
+      become_user: ubuntu
+      copy:
+        dest: "{{ project_dest }}/frontend/.env"
+        content: |
+          REACT_APP_BACKEND_URL=http://{{ web_server_public_ip }}:{{ backend_port }}
+        mode: '0600'
+
+    - name: Build frontend application
+      become: yes
+      become_user: ubuntu
+      command: npm run build
+      args:
+        chdir: "{{ project_dest }}/frontend"
+
+    - name: Deploy backend process using PM2
+      become: yes
+      become_user: ubuntu
+      shell: |
+        pm2 describe travelmemory-backend || pm2 start index.js --name travelmemory-backend
+      args:
+        chdir: "{{ project_dest }}/backend"
+      register: pm2_backend
+      changed_when: "'online' in pm2_backend.stdout"
+
+    - name: Deploy frontend process using PM2 (serve static files on port 3000)
+      become: yes
+      become_user: ubuntu
+      shell: |
+        pm2 describe travelmemory-frontend || pm2 start "serve -s build -l 3000" --name travelmemory-frontend
+      args:
+        chdir: "{{ project_dest }}/frontend"
+      register: pm2_frontend
+      changed_when: "'online' in pm2_frontend.stdout"
+
+    - name: Save PM2 process list for persistence
+      become: yes
+      become_user: ubuntu
+      command: pm2 save
+
+    # ==========================
+    # SECURITY HARDENING (WEB)
+    # ==========================
+    - name: Disable SSH Root Login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: Reload SSH
+
+    - name: Disable SSH Password Authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: Reload SSH
+
+    - name: Configure UFW firewall for Web Server
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: tcp
+      loop:
+        - { port: '22' }       # SSH
+        - { port: '80' }       # HTTP
+        - { port: '443' }      # HTTPS
+        - { port: '3000' }     # MERN Frontend
+        - { port: '3001' }     # MERN Backend
+
+    - name: Enable UFW firewall
+      ufw:
+        state: enabled
+        policy: deny
+
+  handlers:
+    - name: Reload SSH
+      service:
+        name: ssh
+        state: reloaded
